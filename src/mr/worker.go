@@ -1,10 +1,14 @@
 package mr
 
-import "fmt"
-import "log"
-import "net/rpc"
-import "hash/fnv"
-
+import (
+	"encoding/json"
+	"fmt"
+	"hash/fnv"
+	"io/ioutil"
+	"log"
+	"net/rpc"
+	"os"
+)
 
 //
 // Map functions return a slice of KeyValue.
@@ -24,6 +28,84 @@ func ihash(key string) int {
 	return int(h.Sum32() & 0x7fffffff)
 }
 
+type MRWorker struct {
+	id      int
+	mapf    func(string, string) []KeyValue
+	reducef func(string, []string) string
+}
+
+func (worker *MRWorker) log(format string, v ...interface{}) {
+	log.Printf("[Worker %d] %s", worker.id, fmt.Sprintf(format, v...))
+}
+
+func (worker *MRWorker) call() bool {
+	args := RequestWorkArgs{
+		WorkerId: worker.id,
+	}
+	reply := RequestWorkReply{}
+	if !call("Coordinator.RequestWork", &args, &reply) {
+		return false
+	}
+	if reply.IsMap {
+		worker.handleMapWork(&reply)
+	} else {
+		worker.handleReduceWork(&reply)
+	}
+	return true
+}
+
+// all errors are ignored and logged, to trigger the timeout then soon the coordinator will retry it
+// note: we can send a rpc to invoke a quick-fail
+func (worker *MRWorker) handleMapWork(task *RequestWorkReply) {
+	file, err := os.Open(task.Filename)
+	if err != nil {
+		worker.log("cannot open %v", task.Filename)
+		return
+	}
+	content, err := ioutil.ReadAll(file)
+	if err != nil {
+		worker.log("cannot read %v", content)
+		return
+	}
+	file.Close()
+	kva := worker.mapf(task.Filename, string(content))
+
+	buckets := make([][]KeyValue, task.NReduce)
+	for _, v := range kva {
+		i := ihash(v.Key) % task.NReduce
+		buckets[i] = append(buckets[i], v)
+	}
+	intermediateFiles := make([]string, task.NReduce)
+	for i, b := range buckets {
+		imFn := intermediateFn(worker.id, i)
+		imFile, err := os.Create(imFn)
+		if err != nil {
+			worker.log("cannot create %v", imFn)
+			return
+		}
+		enc := json.NewEncoder(imFile)
+		if err = enc.Encode(b); err != nil {
+			worker.log("cannot encode into %v", imFn)
+			return
+		}
+		imFile.Close()
+		intermediateFiles[i] = imFn
+	}
+	submitArgs := SubmitWorkArgs{
+		TaskId:            task.TaskId,
+		IntermediateFiles: intermediateFiles,
+	}
+	submitReply := SubmitWorkReply{} // ignore reply
+	call("Coordinator.SubmitWork", submitArgs, &submitReply)
+}
+
+func intermediateFn(mapTaskId int, reduceTaskId int) string {
+	return fmt.Sprintf("mr-%d-%d", mapTaskId, reduceTaskId)
+}
+
+func (worker *MRWorker) handleReduceWork(work *RequestWorkReply) {
+
+}
 
 //
 // main/mrworker.go calls this function.
@@ -32,10 +114,13 @@ func Worker(mapf func(string, string) []KeyValue,
 	reducef func(string, []string) string) {
 
 	// Your worker implementation here.
-
-	// uncomment to send the Example RPC to the coordinator.
-	// CallExample()
-
+	worker := MRWorker{
+		id:      os.Getpid(),
+		mapf:    mapf,
+		reducef: reducef,
+	}
+	for worker.call() {
+	}
 }
 
 //
