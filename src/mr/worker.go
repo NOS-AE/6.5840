@@ -8,6 +8,7 @@ import (
 	"log"
 	"net/rpc"
 	"os"
+	"sort"
 )
 
 //
@@ -35,13 +36,11 @@ type MRWorker struct {
 }
 
 func (worker *MRWorker) log(format string, v ...interface{}) {
-	log.Printf("[Worker %d] %s", worker.id, fmt.Sprintf(format, v...))
+	log.Printf("[Worker %d] %s\n", worker.id, fmt.Sprintf(format, v...))
 }
 
 func (worker *MRWorker) call() bool {
-	args := RequestWorkArgs{
-		WorkerId: worker.id,
-	}
+	args := RequestWorkArgs{}
 	reply := RequestWorkReply{}
 	if !call("Coordinator.RequestWork", &args, &reply) {
 		return false
@@ -75,9 +74,8 @@ func (worker *MRWorker) handleMapWork(task *RequestWorkReply) {
 		i := ihash(v.Key) % task.NReduce
 		buckets[i] = append(buckets[i], v)
 	}
-	intermediateFiles := make([]string, task.NReduce)
 	for i, b := range buckets {
-		imFn := intermediateFn(worker.id, i)
+		imFn := intermediateFn(task.TaskIndex, i)
 		imFile, err := os.Create(imFn)
 		if err != nil {
 			worker.log("cannot create %v", imFn)
@@ -89,22 +87,74 @@ func (worker *MRWorker) handleMapWork(task *RequestWorkReply) {
 			return
 		}
 		imFile.Close()
-		intermediateFiles[i] = imFn
 	}
+
+	// submit map task
 	submitArgs := SubmitWorkArgs{
-		TaskId:            task.TaskId,
-		IntermediateFiles: intermediateFiles,
+		TaskId: task.TaskId,
 	}
 	submitReply := SubmitWorkReply{} // ignore reply
 	call("Coordinator.SubmitWork", submitArgs, &submitReply)
 }
 
-func intermediateFn(mapTaskId int, reduceTaskId int) string {
-	return fmt.Sprintf("mr-%d-%d", mapTaskId, reduceTaskId)
+func intermediateFn(mapIndex int, reduceIndex int) string {
+	return fmt.Sprintf("mr-%d-%d", mapIndex, reduceIndex)
 }
 
-func (worker *MRWorker) handleReduceWork(work *RequestWorkReply) {
+type ByKey []KeyValue
 
+func (a ByKey) Len() int           { return len(a) }
+func (a ByKey) Swap(i, j int)      { a[i], a[j] = a[j], a[i] }
+func (a ByKey) Less(i, j int) bool { return a[i].Key < a[j].Key }
+
+func (worker *MRWorker) handleReduceWork(task *RequestWorkReply) {
+	intermediate := []KeyValue{}
+	for i := 0; i < task.NMap; i++ {
+		imFn := intermediateFn(i, task.TaskIndex)
+		file, err := os.Open(imFn)
+		if err != nil {
+			worker.log("cannot open %v", imFn)
+			return
+		}
+		im := []KeyValue{}
+		dec := json.NewDecoder(file)
+		if err = dec.Decode(&im); err != nil {
+			worker.log("cannot decode %v", imFn)
+			return
+		}
+		file.Close()
+		intermediate = append(intermediate, im...)
+	}
+
+	outFn := fmt.Sprintf("mr-out-%d", task.TaskIndex)
+	outFile, err := os.Create(outFn)
+	if err != nil {
+		worker.log("cannot create %v", outFn)
+		return
+	}
+	sort.Sort(ByKey(intermediate))
+	i := 0
+	for i < len(intermediate) {
+		j := i + 1
+		for j < len(intermediate) && intermediate[j].Key == intermediate[i].Key {
+			j++
+		}
+		values := []string{}
+		for k := i; k < j; k++ {
+			values = append(values, intermediate[k].Value)
+		}
+		output := worker.reducef(intermediate[i].Key, values)
+		fmt.Fprintf(outFile, "%v %v\n", intermediate[i].Key, output)
+
+		i = j
+	}
+
+	// submit reduce task
+	submitArgs := SubmitWorkArgs{
+		TaskId: task.TaskId,
+	}
+	submitReply := SubmitWorkReply{} // ignore reply
+	call("Coordinator.SubmitWork", submitArgs, &submitReply)
 }
 
 //

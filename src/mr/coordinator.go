@@ -2,7 +2,6 @@ package mr
 
 import (
 	"errors"
-	"fmt"
 	"log"
 	"math"
 	"net"
@@ -16,6 +15,7 @@ import (
 type Coordinator struct {
 	// Your definitions here.
 	nReduce      int
+	nMap         int
 	mu           sync.Mutex
 	tasks        chan *mrtask
 	taskNum      int
@@ -24,12 +24,11 @@ type Coordinator struct {
 }
 
 type mrtask struct {
-	isMap       bool
-	taskId      int // taskId is auto-incremented
-	filename    string
-	mapIndex    int
-	reduceIndex int
-	timer       *time.Timer
+	isMap     bool
+	taskId    int // taskId is auto-incremented
+	filename  string
+	taskIndex int
+	timer     *time.Timer
 }
 
 var doneErr = errors.New("done")
@@ -43,7 +42,6 @@ func (c *Coordinator) RequestWork(args *RequestWorkArgs, reply *RequestWorkReply
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
-	log.Println("request", task)
 	c.runningTasks[task.taskId] = task
 	c.setTimeout(task)
 
@@ -52,10 +50,12 @@ func (c *Coordinator) RequestWork(args *RequestWorkArgs, reply *RequestWorkReply
 		reply.TaskId = task.taskId
 		reply.Filename = task.filename
 		reply.NReduce = c.nReduce
+		reply.TaskIndex = task.taskIndex
 	} else {
 		reply.IsMap = false
 		reply.TaskId = task.taskId
-		reply.ReduceIndex = task.reduceIndex
+		reply.NMap = c.nMap
+		reply.TaskIndex = task.taskIndex
 	}
 	return nil
 }
@@ -81,23 +81,26 @@ func (c *Coordinator) SubmitWork(args *SubmitWorkArgs, reply *SubmitWorkReply) e
 	defer c.mu.Unlock()
 
 	task, ok := c.runningTasks[args.TaskId]
-	log.Println(task, ok)
 	// if not ok, we can know that the task is timeout and deleted by timer
 	if !ok {
 		return timeoutErr
 	}
 	task.timer.Stop()
 	delete(c.runningTasks, task.taskId)
-	for i, imFn := range args.IntermediateFiles {
-		newName := fmt.Sprintf("mr-%d-%d", task.mapIndex, i)
-		log.Println("rename", newName)
-		os.Rename(imFn, newName)
-	}
 
 	// since a work is submitted, update the coordinator
 	c.taskNum--
 	if c.taskNum == 0 {
 		close(c.tasks)
+	} else if c.taskNum == c.nReduce {
+		for i := 0; i < c.nReduce; i++ {
+			task = &mrtask{
+				isMap:     false,
+				taskId:    c.genTaskId(),
+				taskIndex: i,
+			}
+			c.tasks <- task
+		}
 	}
 
 	return nil
@@ -144,19 +147,20 @@ func (c *Coordinator) Done() bool {
 func MakeCoordinator(files []string, nReduce int) *Coordinator {
 	c := Coordinator{
 		nReduce: nReduce,
+		nMap:    len(files),
 		tasks:   make(chan *mrtask, int(math.Max(float64(nReduce), float64(len(files))))),
-		// taskNum:      len(files) + nReduce,
-		taskNum:      len(files),
+		taskNum: len(files) + nReduce,
+		// taskNum:      len(files),
 		runningTasks: make(map[int]*mrtask),
 		nextTaskId:   1,
 	}
 
 	for i, f := range files {
 		c.tasks <- &mrtask{
-			isMap:    true,
-			taskId:   c.genTaskId(),
-			filename: f,
-			mapIndex: i,
+			isMap:     true,
+			taskId:    c.genTaskId(),
+			filename:  f,
+			taskIndex: i,
 		}
 	}
 

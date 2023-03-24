@@ -26,25 +26,23 @@ type ExampleReply struct {
 
 // Add your RPC definitions here.
 
-type RequestWorkArgs struct {
-	WorkerId int
-}
+type RequestWorkArgs struct{}
 
 type RequestWorkReply struct {
-	IsMap  bool
-	TaskId int
-	// for map task
-	Filename string
-	NReduce  int
-	// for reduce task
-	ReduceIndex int
+	IsMap     bool
+	NReduce   int
+	NMap      int
+	TaskId    int // carry the TaskId when submit a task
+	TaskIndex int // map task or a reduce task
+
+	Filename string // for map task
+
 }
 
 // NOTE: we can merge "request/submit" as request, which means, request new task with the last submitted
 // but for simplicity, sperate it as two rpc
 type SubmitWorkArgs struct {
-	TaskId            int
-	IntermediateFiles []string
+	TaskId int
 }
 
 type SubmitWorkReply struct {
