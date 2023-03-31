@@ -1,8 +1,7 @@
 #!/usr/bin/env bash
 
-# usage: sh test.sh [2A 2B...]
+# usage: sh test-single.sh [test1_name iter1 test2_name iter2...]
 
-# test test_name iter_num test_set
 function test {
   echo $1
   shift
@@ -30,32 +29,16 @@ function test {
 }
 
 params="$@"
-
-# 2A Tests
-declare -a lab2a_tests=(
-  TestInitialElection2A
-  TestReElection2A
-  TestManyElections2A
-)
-if [[ "${params[*]}" =~ "2A" ]]; then
-  test "2A Test" 100 "${lab2a_tests[@]}"
-fi
-
-# 2B Tests
-declare -a lab2b_tests=(
-  TestBasicAgree2B
-  TestRPCBytes2B
-  TestFollowerFailure2B
-  TestLeaderFailure2B
-  TestFailAgree2B
-  TestFailNoAgree2
-  TestConcurrentStarts2B
-  TestRejoin2B
-  TestBackup2B
-  TestCount2B
-)
-if [[ "${params[*]}" =~ "2B" ]]; then
-  test "2B Test" 20 "${lab2b_tests[@]}"
-fi
-
-print \nALL PASS!
+while true; do
+  test $1 $2 $1
+  shift; shift
+  params="$@"
+  if [ -z "${params}" ]; then
+    break
+  fi
+done
+# while [ ${#params[@]} != 0 ]; do
+#   echo $1 $2
+#   shift; shift
+#   params="$@"
+# done

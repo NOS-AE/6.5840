@@ -104,6 +104,7 @@ func init() {
 		if err != nil {
 			log.Fatal(err)
 		}
+		log.SetFlags(log.Default().Flags() | log.Lmicroseconds)
 		log.SetOutput(file)
 	}
 }
@@ -245,6 +246,7 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	}
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
+	rf.debug("requestVote: %+v", *args)
 	if args.Term < rf.currentTerm {
 		notGrant()
 		return
@@ -636,6 +638,7 @@ func (rf *Raft) ticker() {
 				go rf.startElection()
 			}
 			rf.mu.Unlock()
+			ticker.Reset(genElectionTimeout())
 		case m := <-rf.staleCh:
 			rf.mu.Lock()
 			rf.currentTerm = m.term
