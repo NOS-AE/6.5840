@@ -96,10 +96,11 @@ type Raft struct {
 }
 
 const logEnable = true
+const logToFile = true
 
 func init() {
-	if logEnable {
-		file, err := os.OpenFile("raft.log.ans", os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0777)
+	if logEnable && logToFile {
+		file, err := os.OpenFile("raft.log.ans", os.O_APPEND|os.O_WRONLY, 0777)
 		if err != nil {
 			log.Fatal(err)
 		}
@@ -288,11 +289,13 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	}
 	rf.staleCh <- staleMsg{args.Term, true}
 	if len(args.Entries) > 0 {
-		rf.debug("rcv %+v", *args)
+		rf.debug("rcv appendEntries %+v", *args)
+	} else {
+		rf.debug("rcv heartbeat %v", args)
 	}
 
 	if len(rf.log) <= args.PrevLogIndex { // entry not exist
-		rf.debug("not exist")
+		rf.debug("not exist, has: %+v", rf.log)
 		reply.Success = false
 	} else if rf.log[args.PrevLogIndex].Term != args.PrevLogTerm { // entry conflict with leader
 		rf.debug("conflict")
@@ -300,8 +303,8 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		reply.Success = false
 	} else { // append entry
 		rf.log = rf.log[:args.PrevLogIndex+1]
-		reply.Success = true
 		rf.log = append(rf.log, args.Entries...)
+		reply.Success = true
 	}
 	rf.currentTerm = args.Term
 	reply.Term = args.Term
@@ -352,14 +355,12 @@ func (rf *Raft) sendAppendEntries(server int, args *AppendEntriesArgs, reply *Ap
 	return ok
 }
 
-const sendTimeout = heartbeatInterval
-
-func sendWithTimeout(f func() bool) (ret bool) {
+func sendWithTimeout(f func() bool, timeout time.Duration) (ret bool) {
 	ch := make(chan bool, 1)
 	go func() {
 		ch <- f()
 	}()
-	timer := time.NewTimer(sendTimeout)
+	timer := time.NewTimer(timeout)
 	defer timer.Stop()
 	select {
 	case ret = <-ch:
@@ -422,50 +423,14 @@ func (rf *Raft) killed() bool {
 }
 
 const heartbeatInterval = 150 * time.Millisecond
-
-func (rf *Raft) heartbeat(server int, term int) {
-	ticker := time.NewTicker(heartbeatInterval)
-	defer ticker.Stop()
-	for ; !rf.killed(); <-ticker.C {
-		rf.mu.Lock()
-		if rf.state != Leader || rf.currentTerm != term {
-			rf.mu.Unlock()
-			return
-		}
-		args := AppendEntriesArgs{
-			Term:         rf.currentTerm,
-			LeaderId:     rf.me,
-			PrevLogIndex: rf.nextIndex[server] - 1,
-			PrevLogTerm:  rf.log[rf.nextIndex[server]-1].Term,
-			LeaderCommit: rf.commitIndex,
-		}
-		rf.mu.Unlock()
-		reply := AppendEntriesReply{}
-		ok := sendWithTimeout(func() bool {
-			return rf.sendAppendEntries(server, &args, &reply)
-		})
-		rf.mu.Lock()
-		if rf.state != Leader || rf.currentTerm != term {
-			rf.mu.Unlock()
-			return
-		}
-		rf.mu.Unlock()
-		if ok {
-			if !reply.Success {
-				rf.staleCh <- staleMsg{reply.Term, true}
-				return
-			}
-		}
-	}
-}
-
-const checkReplicateInterval = 20 * time.Millisecond
+const checkReplicateInterval = 10 * time.Millisecond
 
 func (rf *Raft) handleReplicate(server int, term int) {
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
+	nextTick := time.Now()
 	for !rf.killed() && rf.state == Leader && rf.currentTerm == term {
-		if rf.nextIndex[server] == len(rf.log) {
+		if rf.nextIndex[server] == len(rf.log) && nextTick.After(time.Now()) {
 			rf.mu.Unlock()
 			time.Sleep(checkReplicateInterval)
 			rf.mu.Lock()
@@ -475,29 +440,32 @@ func (rf *Raft) handleReplicate(server int, term int) {
 			log.Fatalf("rf.nextIndex[server] > len(rf.log): %+v", rf.nextIndex)
 		}
 		index := rf.nextIndex[server]
-		entry := rf.log[index]
 		args := AppendEntriesArgs{
-			Term:     rf.currentTerm,
-			LeaderId: rf.me,
-			Entries: []Entry{
-				entry,
-			},
+			Term:         rf.currentTerm,
+			LeaderId:     rf.me,
 			PrevLogIndex: index - 1,
 			PrevLogTerm:  rf.log[index-1].Term,
 			LeaderCommit: rf.commitIndex,
 		}
+		if index < len(rf.log) {
+			entry := rf.log[index]
+			args.Entries = []Entry{
+				entry,
+			}
+		}
 		reply := AppendEntriesReply{}
 		rf.mu.Unlock()
-		hasSent := sendWithTimeout(func() bool {
+		nextTick = time.Now().Add(heartbeatInterval)
+		ok := sendWithTimeout(func() bool {
 			return rf.sendAppendEntries(server, &args, &reply)
-		})
+		}, heartbeatInterval/2)
 		rf.mu.Lock()
-		if rf.state != Leader || rf.currentTerm != term {
+		if rf.state != Leader || rf.currentTerm != term || rf.killed() {
 			return
 		}
-		if !hasSent {
+		if !ok {
 			rf.mu.Unlock()
-			time.Sleep(sendTimeout) // sleep a while before retry
+			time.Sleep(heartbeatInterval / 2) // sleep a while before retry
 			rf.mu.Lock()
 			continue
 		}
@@ -505,27 +473,29 @@ func (rf *Raft) handleReplicate(server int, term int) {
 			rf.staleCh <- staleMsg{reply.Term, true}
 			return
 		}
-		rf.nextIndex[server]++
-		rf.debug("replicate success: %+v", rf.nextIndex)
-		if rf.commitIndex >= index {
-			continue
-		}
-		if rf.log[index].Term == rf.currentTerm { // 5.4.2
-			replicaAtIndex := 0
-			for _, i := range rf.nextIndex {
-				if i > index {
-					replicaAtIndex++
-				}
+		if len(args.Entries) > 0 {
+			rf.nextIndex[server] += len(args.Entries)
+			rf.debug("replicate success: %+v", rf.nextIndex)
+			if rf.commitIndex >= index {
+				continue
 			}
-			if replicaAtIndex == rf.majority() {
-				rf.commitIndex = index
+			if rf.log[index].Term == rf.currentTerm { // 5.4.2
+				replicaAtIndex := 0
+				for _, i := range rf.nextIndex {
+					if i > index {
+						replicaAtIndex++
+					}
+				}
+				if replicaAtIndex == rf.majority() {
+					rf.commitIndex = index
+				}
 			}
 		}
 	}
 }
 
 // return true if stale
-func (rf *Raft) consistencyCheck(server int, term int) (isStale bool, isOutdatedTerm bool) {
+func (rf *Raft) consistencyCheck(server int, term int) (isStale bool) {
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
 
@@ -544,10 +514,10 @@ func (rf *Raft) consistencyCheck(server int, term int) (isStale bool, isOutdated
 		rf.mu.Unlock()
 		ok := sendWithTimeout(func() bool {
 			return rf.sendAppendEntries(server, &args, &reply)
-		})
+		}, heartbeatInterval)
 		rf.mu.Lock()
-		if rf.currentTerm != term || rf.state != Leader {
-			return false, true
+		if rf.currentTerm != term || rf.state != Leader || rf.killed() {
+			return true
 		}
 		if !ok {
 			continue
@@ -555,7 +525,7 @@ func (rf *Raft) consistencyCheck(server int, term int) (isStale bool, isOutdated
 		// got reply
 		if !reply.Success && reply.Term > term {
 			rf.staleCh <- staleMsg{reply.Term, true}
-			return true, false
+			return true
 		}
 		if reply.Success {
 			break
@@ -565,15 +535,15 @@ func (rf *Raft) consistencyCheck(server int, term int) (isStale bool, isOutdated
 	// rf.matchIndex[server] = rf.nextIndex[server] - 1
 	rf.debug("consistency at server[%d] reach: %+v", server, rf.nextIndex)
 
-	return false, false
+	return false
 }
 
 func (rf *Raft) servePeer(server int, term int) {
-	if isStale, isOutdatedTerm := rf.consistencyCheck(server, term); isStale || isOutdatedTerm {
+	if isStale := rf.consistencyCheck(server, term); isStale {
 		return
 	}
 	go rf.handleReplicate(server, term)
-	go rf.heartbeat(server, term)
+	// go rf.heartbeat(server, term)
 }
 
 func (rf *Raft) startLeader() {
@@ -637,9 +607,9 @@ func (rf *Raft) requestVote(server int, grantCh chan<- struct{}, term int) {
 		reply := RequestVoteReply{}
 		ok := sendWithTimeout(func() bool {
 			return rf.sendRequestVote(server, &args, &reply)
-		})
+		}, heartbeatInterval)
 		rf.mu.Lock()
-		if term != rf.currentTerm || rf.state != Candidate {
+		if term != rf.currentTerm || rf.state != Candidate || rf.killed() {
 			return
 		}
 		if ok {
