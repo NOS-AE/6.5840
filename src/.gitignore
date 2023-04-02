@@ -11,3 +11,4 @@ mrtmp.*
 /main/mrsequential
 /main/mrworker
 /raft/raft.log.ans
+.DS_Store

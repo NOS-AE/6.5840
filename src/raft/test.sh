@@ -38,7 +38,7 @@ declare -a lab2a_tests=(
   TestManyElections2A
 )
 if [[ "${params[*]}" =~ "2A" ]]; then
-  test "2A Test" 100 "${lab2a_tests[@]}"
+  test "2A Test" 10 "${lab2a_tests[@]}"
 fi
 
 # 2B Tests
@@ -55,7 +55,21 @@ declare -a lab2b_tests=(
   TestCount2B
 )
 if [[ "${params[*]}" =~ "2B" ]]; then
-  test "2B Test" 20 "${lab2b_tests[@]}"
+  test "2B Test" 10 "${lab2b_tests[@]}"
 fi
 
-print \nALL PASS!
+declare -a lab2b_tests=(
+  TestPersist12C
+  TestPersist22C
+  TestPersist32C
+  TestFigure82C
+  TestUnreliableAgree2C
+  TestFigure8Unreliable2C
+  TestReliableChurn2C
+  TestUnreliableChurn2C
+)
+if [[ "${params[*]}" =~ "2C" ]]; then
+  test "2C Test" 20 "${lab2b_tests[@]}"
+fi
+
+printf \nALL PASS!

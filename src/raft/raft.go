@@ -20,6 +20,7 @@ package raft
 import (
 	//	"bytes"
 
+	"bytes"
 	"fmt"
 	"log"
 	"math/rand"
@@ -29,6 +30,7 @@ import (
 	"time"
 
 	//	"6.5840/labgob"
+	"6.5840/labgob"
 	"6.5840/labrpc"
 )
 
@@ -131,19 +133,26 @@ func (rf *Raft) majority() int {
 }
 
 func (rf *Raft) setState(state int) {
-	if rf.state == Follower && state == Candidate {
-		rf.debug("follower->candidate")
-	} else if rf.state == Candidate {
-		if state == Follower {
-			rf.debug("candidate->follower")
-		} else if state == Candidate {
-			rf.debug("candidate->candidate")
-		} else {
-			rf.debug("candidate->leader")
-		}
-	} else if rf.state == Leader && state == Follower {
-		rf.debug("leader->follower")
+	if state == Follower && rf.state == Follower {
+		return
 	}
+	var from string
+	var to string
+	if rf.state == Follower {
+		from = "follower"
+	} else if rf.state == Candidate {
+		from = "candidate"
+	} else {
+		from = "leader"
+	}
+	if state == Follower {
+		to = "follower"
+	} else if state == Candidate {
+		to = "candidate"
+	} else {
+		to = "leader"
+	}
+	rf.debug(from + "->" + to)
 	rf.state = state
 }
 
@@ -167,13 +176,13 @@ func (rf *Raft) GetState() (int, bool) {
 // (or nil if there's not yet a snapshot).
 func (rf *Raft) persist() {
 	// Your code here (2C).
-	// Example:
-	// w := new(bytes.Buffer)
-	// e := labgob.NewEncoder(w)
-	// e.Encode(rf.xxx)
-	// e.Encode(rf.yyy)
-	// raftstate := w.Bytes()
-	// rf.persister.Save(raftstate, nil)
+	w := new(bytes.Buffer)
+	enc := labgob.NewEncoder(w)
+	enc.Encode(rf.currentTerm)
+	enc.Encode(rf.votedFor)
+	enc.Encode(rf.log)
+	raftState := w.Bytes()
+	rf.persister.Save(raftState, nil)
 }
 
 // restore previously persisted state.
@@ -182,18 +191,11 @@ func (rf *Raft) readPersist(data []byte) {
 		return
 	}
 	// Your code here (2C).
-	// Example:
-	// r := bytes.NewBuffer(data)
-	// d := labgob.NewDecoder(r)
-	// var xxx
-	// var yyy
-	// if d.Decode(&xxx) != nil ||
-	//    d.Decode(&yyy) != nil {
-	//   error...
-	// } else {
-	//   rf.xxx = xxx
-	//   rf.yyy = yyy
-	// }
+	r := bytes.NewBuffer(data)
+	dec := labgob.NewDecoder(r)
+	if dec.Decode(&rf.currentTerm) != nil || dec.Decode(&rf.votedFor) != nil || dec.Decode(&rf.log) != nil {
+		log.Fatal("decode error")
+	}
 }
 
 // the service says it has created a snapshot that has
@@ -238,7 +240,10 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	}
 	grant := func() {
 		reply.VoteGranted = true
-		rf.votedFor = args.CandidateId
+		if rf.votedFor != args.CandidateId {
+			rf.votedFor = args.CandidateId
+			rf.persist()
+		}
 	}
 	notGrant := func() {
 		reply.VoteGranted = false
@@ -246,7 +251,6 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	}
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
-	rf.debug("requestVote: %+v", *args)
 	if args.Term < rf.currentTerm {
 		notGrant()
 		return
@@ -278,6 +282,10 @@ type AppendEntriesArgs struct {
 type AppendEntriesReply struct {
 	Term    int
 	Success bool
+
+	XTerm  int // term in the conflicting entry
+	XIndex int // index of first entry with that term
+	XLen   int // log length
 }
 
 func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply) {
@@ -293,24 +301,34 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	if len(args.Entries) > 0 {
 		rf.debug("rcv appendEntries %+v", *args)
 	} else {
-		rf.debug("rcv heartbeat %v", args)
+		// rf.debug("rcv heartbeat %v", args)
 	}
 
 	if len(rf.log) <= args.PrevLogIndex { // entry not exist
-		rf.debug("not exist, has: %+v", rf.log)
+		rf.debug("not exist, length=%d, require=%d", len(rf.log), args.PrevLogIndex)
 		reply.Success = false
+		reply.XLen = len(rf.log)
 	} else if rf.log[args.PrevLogIndex].Term != args.PrevLogTerm { // entry conflict with leader
-		rf.debug("conflict")
-		rf.log = rf.log[:args.PrevLogIndex]
+		rf.debug("conflict at %d, term=%v, required=%+v, log=%+v", args.PrevLogIndex, rf.log[args.PrevLogIndex], args.PrevLogTerm, rf.log)
 		reply.Success = false
+		reply.XIndex = args.PrevLogIndex
+		reply.XTerm = rf.log[reply.XIndex].Term
+		for reply.XIndex > 0 && rf.log[reply.XIndex-1].Term == reply.XTerm {
+			reply.XIndex--
+		}
+		reply.XLen = len(rf.log)
+		rf.log = rf.log[:args.PrevLogIndex]
+		rf.persist()
 	} else { // append entry
+		diff := len(rf.log) > args.PrevLogIndex+1 || len(args.Entries) > 0
 		rf.log = rf.log[:args.PrevLogIndex+1]
 		rf.log = append(rf.log, args.Entries...)
+		if diff {
+			rf.persist()
+		}
 		reply.Success = true
 	}
-	rf.currentTerm = args.Term
 	reply.Term = args.Term
-
 	if reply.Success {
 		if args.LeaderCommit < len(rf.log)-1 {
 			rf.commitIndex = args.LeaderCommit
@@ -398,6 +416,7 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 			Term:    rf.currentTerm,
 			Command: command,
 		})
+		rf.persist()
 		// rf.matchIndex[rf.me] = rf.nextIndex[rf.me]
 		rf.nextIndex[rf.me]++
 	}
@@ -443,18 +462,16 @@ func (rf *Raft) handleReplicate(server int, term int) {
 		}
 		index := rf.nextIndex[server]
 		args := AppendEntriesArgs{
-			Term:         rf.currentTerm,
+			Term:         term,
 			LeaderId:     rf.me,
 			PrevLogIndex: index - 1,
 			PrevLogTerm:  rf.log[index-1].Term,
 			LeaderCommit: rf.commitIndex,
 		}
 		if index < len(rf.log) {
-			entry := rf.log[index]
-			args.Entries = []Entry{
-				entry,
-			}
+			args.Entries = rf.log[index:len(rf.log)]
 		}
+		size := len(args.Entries)
 		reply := AppendEntriesReply{}
 		rf.mu.Unlock()
 		nextTick = time.Now().Add(heartbeatInterval)
@@ -475,20 +492,22 @@ func (rf *Raft) handleReplicate(server int, term int) {
 			rf.staleCh <- staleMsg{reply.Term, true}
 			return
 		}
-		if len(args.Entries) > 0 {
-			rf.nextIndex[server] += len(args.Entries)
-			rf.debug("replicate success: %+v", rf.nextIndex)
+		if size > 0 {
+			// rf.debug("replicate success: %+v", rf.nextIndex)
+			index += size
+			rf.nextIndex[server] = index
+			index--
 			if rf.commitIndex >= index {
 				continue
 			}
-			if rf.log[index].Term == rf.currentTerm { // 5.4.2
+			if rf.log[index].Term == term { // 5.4.2
 				replicaAtIndex := 0
 				for _, i := range rf.nextIndex {
 					if i > index {
 						replicaAtIndex++
 					}
 				}
-				if replicaAtIndex == rf.majority() {
+				if replicaAtIndex >= rf.majority() {
 					rf.commitIndex = index
 				}
 			}
@@ -501,12 +520,12 @@ func (rf *Raft) consistencyCheck(server int, term int) (isStale bool) {
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
 
-	for !rf.killed() {
+	for !rf.killed() && rf.state == Leader && rf.currentTerm == term {
 		rf.debug("decrement[%d], %+v\n", server, rf.nextIndex)
 		nextIndex := rf.nextIndex[server]
 		prevEntry := rf.log[nextIndex-1]
 		args := AppendEntriesArgs{
-			Term:         rf.currentTerm,
+			Term:         term,
 			LeaderId:     rf.me,
 			PrevLogIndex: nextIndex - 1,
 			PrevLogTerm:  prevEntry.Term,
@@ -516,15 +535,17 @@ func (rf *Raft) consistencyCheck(server int, term int) (isStale bool) {
 		rf.mu.Unlock()
 		ok := sendWithTimeout(func() bool {
 			return rf.sendAppendEntries(server, &args, &reply)
-		}, heartbeatInterval)
+		}, heartbeatInterval/2)
 		rf.mu.Lock()
 		if rf.currentTerm != term || rf.state != Leader || rf.killed() {
 			return true
 		}
 		if !ok {
+			rf.debug("timeout serving[%d]", server)
 			continue
 		}
 		// got reply
+		rf.debug("got reply[%d]: %+v", server, reply)
 		if !reply.Success && reply.Term > term {
 			rf.staleCh <- staleMsg{reply.Term, true}
 			return true
@@ -532,7 +553,21 @@ func (rf *Raft) consistencyCheck(server int, term int) (isStale bool) {
 		if reply.Success {
 			break
 		}
-		rf.nextIndex[server]--
+		if reply.XLen < nextIndex { // case3
+			rf.nextIndex[server] = reply.XLen
+		} else {
+			nextIndex--
+			for nextIndex >= 0 && rf.log[nextIndex].Term != reply.XTerm {
+				nextIndex--
+			}
+			if nextIndex < 0 { // case1
+				rf.debug("no term %d", reply.XTerm)
+				rf.nextIndex[server] = reply.XIndex
+			} else { // case2
+				rf.nextIndex[server] = nextIndex + 1
+			}
+		}
+		// rf.nextIndex[server]--
 	}
 	// rf.matchIndex[server] = rf.nextIndex[server] - 1
 	rf.debug("consistency at server[%d] reach: %+v", server, rf.nextIndex)
@@ -545,7 +580,6 @@ func (rf *Raft) servePeer(server int, term int) {
 		return
 	}
 	go rf.handleReplicate(server, term)
-	// go rf.heartbeat(server, term)
 }
 
 func (rf *Raft) startLeader() {
@@ -560,12 +594,11 @@ func (rf *Raft) startLeader() {
 	}
 }
 
-func (rf *Raft) startElection() {
+func (rf *Raft) startElection(term int) {
 	rf.mu.Lock()
 	rf.setState(Candidate)
 	rf.votedFor = rf.me
-	rf.currentTerm++
-	term := rf.currentTerm
+	rf.persist()
 	rf.mu.Unlock()
 
 	grantCh := make(chan struct{}, len(rf.peers))
@@ -600,7 +633,7 @@ func (rf *Raft) requestVote(server int, grantCh chan<- struct{}, term int) {
 	defer rf.mu.Unlock()
 	for !rf.killed() {
 		args := RequestVoteArgs{
-			Term:         rf.currentTerm,
+			Term:         term,
 			CandidateId:  rf.me,
 			LastLogIndex: len(rf.log) - 1,
 			LastLogTerm:  rf.log[len(rf.log)-1].Term,
@@ -635,15 +668,19 @@ func (rf *Raft) ticker() {
 		case <-ticker.C:
 			rf.mu.Lock()
 			if rf.state != Leader {
-				go rf.startElection()
+				rf.currentTerm++
+				rf.persist()
+				go rf.startElection(rf.currentTerm)
 			}
 			rf.mu.Unlock()
 			ticker.Reset(genElectionTimeout())
 		case m := <-rf.staleCh:
 			rf.mu.Lock()
-			rf.currentTerm = m.term
 			rf.setState(Follower)
-			rf.votedFor = -1
+			if rf.currentTerm != m.term {
+				rf.currentTerm = m.term
+				rf.persist()
+			}
 			rf.mu.Unlock()
 			if m.resetTicker {
 				ticker.Reset(genElectionTimeout())
@@ -695,7 +732,6 @@ func Make(peers []*labrpc.ClientEnd, me int,
 
 	// Your initialization code here (2A, 2B, 2C).
 	rf.staleCh = make(chan staleMsg, len(peers))
-	rf.votedFor = -1
 	rf.state = Follower
 	rf.log = make([]Entry, 1)
 	rf.nextIndex = make([]int, len(peers))

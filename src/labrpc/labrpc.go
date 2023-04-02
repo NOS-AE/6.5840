@@ -49,15 +49,18 @@ package labrpc
 //   pass svc to srv.AddService()
 //
 
-import "6.5840/labgob"
-import "bytes"
-import "reflect"
-import "sync"
-import "log"
-import "strings"
-import "math/rand"
-import "time"
-import "sync/atomic"
+import (
+	"bytes"
+	"log"
+	"math/rand"
+	"reflect"
+	"strings"
+	"sync"
+	"sync/atomic"
+	"time"
+
+	"6.5840/labgob"
+)
 
 type reqMsg struct {
 	endname  interface{} // name of sending ClientEnd
@@ -226,6 +229,7 @@ func (rn *Network) processReq(req reqMsg) {
 		}
 
 		if reliable == false && (rand.Int()%1000) < 100 {
+			log.Println("drop reqeust")
 			// drop the request, return as if timeout
 			req.replyCh <- replyMsg{false, nil}
 			return
@@ -274,6 +278,7 @@ func (rn *Network) processReq(req reqMsg) {
 			req.replyCh <- replyMsg{false, nil}
 		} else if reliable == false && (rand.Int()%1000) < 100 {
 			// drop the reply, return as if timeout
+			log.Println("drop reply")
 			req.replyCh <- replyMsg{false, nil}
 		} else if longreordering == true && rand.Intn(900) < 600 {
 			// delay the response for a while
@@ -293,6 +298,7 @@ func (rn *Network) processReq(req reqMsg) {
 		// simulate no reply and eventual timeout.
 		ms := 0
 		if rn.longDelays {
+			log.Println("long delay")
 			// let Raft tests check that leader doesn't send
 			// RPCs synchronously.
 			ms = (rand.Int() % 7000)
