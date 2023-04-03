@@ -298,7 +298,6 @@ func (rn *Network) processReq(req reqMsg) {
 		// simulate no reply and eventual timeout.
 		ms := 0
 		if rn.longDelays {
-			log.Println("long delay")
 			// let Raft tests check that leader doesn't send
 			// RPCs synchronously.
 			ms = (rand.Int() % 7000)
