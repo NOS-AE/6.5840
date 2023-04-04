@@ -11,13 +11,13 @@ function test {
   local i=1
   while ((i<=$iter))
   do
-    echo ======== iteration $i ========
+    echo ======== iteration $i/$iter ========
     ((i+=1))
     for test in "$@"; do
       rm raft.log.ans
       touch raft.log.ans
       echo $test >> raft.log.ans
-      output=$(go test -run $test)
+      output=$(go test -run $test -race)
       if [[ $output == *"PASS"* ]] || [[ $output == *"RACE"* ]]; then # see race as pass
         echo $(date '+%Y-%m-%d %H:%M:%S') "PASS $test!"
       else
@@ -58,7 +58,7 @@ if [[ "${params[*]}" =~ "2B" ]]; then
   test "2B Test" 10 "${lab2b_tests[@]}"
 fi
 
-declare -a lab2b_tests=(
+declare -a lab2c_tests=(
   TestPersist12C
   TestPersist22C
   TestPersist32C
@@ -69,7 +69,20 @@ declare -a lab2b_tests=(
   TestUnreliableChurn2C
 )
 if [[ "${params[*]}" =~ "2C" ]]; then
-  test "2C Test" 20 "${lab2b_tests[@]}"
+  test "2C Test" 10 "${lab2c_tests[@]}"
 fi
 
-printf \nALL PASS!
+declare -a lab2d_tests=(
+  TestSnapshotBasic2D
+  TestSnapshotInstall2D
+  TestSnapshotInstallUnreliable2D
+  TestSnapshotInstallCrash2D
+  TestSnapshotInstallUnCrash2D
+  TestSnapshotAllCrash2D
+  TestSnapshotInit2D
+)
+if [[ "${params[*]}" =~ "2D" ]]; then
+  test "2D Test" 10 "${lab2d_tests[@]}"
+fi
+
+printf "\nALL PASS!"
