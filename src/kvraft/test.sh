@@ -17,14 +17,15 @@ function test {
       rm raft.log.ans
       touch raft.log.ans
       echo $test >> raft.log.ans
+      echo $test
       output=$(go test -run $test -race)
-      if [[ $output == *"PASS"* ]] || [[ $output == *"RACE"* ]]; then # see race as pass
-        echo $(date '+%Y-%m-%d %H:%M:%S') "PASS $test!"
-      else
-        echo $output
-        exit # fail then exit
+      printf "$output\n"
+      if [[ $output != *"PASS"* ]] && [[ $output != *"RACE"* ]]; then # see race as pass
+        exit
+        # echo $(date '+%Y-%m-%d %H:%M:%S') "PASS $test!"
         break
       fi
+      
     done
   done
 }
@@ -83,6 +84,26 @@ declare -a lab2d_tests=(
 )
 if [[ "${params[*]}" =~ "2D" ]]; then
   test "2D Test" 10 "${lab2d_tests[@]}"
+fi
+
+declare -a lab3a_tests=(
+  TestBasic3A
+  TestSpeed3A
+  TestConcurrent3A
+  TestUnreliable3A
+  TestUnreliableOneKey3A
+  TestOnePartition3A
+  TestManyPartitionsOneClient3A
+  TestManyPartitionsManyClients3A
+  TestPersistOneClient3A
+  TestPersistConcurrent3A
+  TestPersistConcurrentUnreliable3A
+  TestPersistPartition3A
+  TestPersistPartitionUnreliable3A
+  TestPersistPartitionUnreliableLinearizable3A
+)
+if [[ "${params[*]}" =~ "3A" ]]; then
+  test "3A Test" 10 "${lab3a_tests[@]}"
 fi
 
 printf "\nALL PASS!"
