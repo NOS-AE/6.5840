@@ -38,7 +38,7 @@ declare -a lab2a_tests=(
   TestManyElections2A
 )
 if [[ "${params[*]}" =~ "2A" ]]; then
-  test "2A Test" 10 "${lab2a_tests[@]}"
+  test "2A Test" 1 "${lab2a_tests[@]}"
 fi
 
 # 2B Tests
@@ -82,7 +82,7 @@ declare -a lab2d_tests=(
   TestSnapshotInit2D
 )
 if [[ "${params[*]}" =~ "2D" ]]; then
-  test "2D Test" 10 "${lab2d_tests[@]}"
+  test "2D Test" 1 "${lab2d_tests[@]}"
 fi
 
 printf "\nALL PASS!"

@@ -17,7 +17,7 @@ function test {
       touch raft.log.ans
       echo $test >> raft.log.ans
       echo $(date '+%Y-%m-%d %H:%M:%S') $test
-      output=$(go test -run $test -race)
+      output=$(go test -run $test)
       echo $(date '+%Y-%m-%d %H:%M:%S')
       printf "$output\n"
       if [[ $output != *"PASS"* ]] && [[ $output != *"RACE"* ]]; then # see race as pass

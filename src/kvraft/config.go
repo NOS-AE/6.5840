@@ -1,20 +1,25 @@
 package kvraft
 
-import "6.5840/labrpc"
-import "testing"
-import "os"
+import (
+	"log"
+	"os"
+	"testing"
 
-// import "log"
-import crand "crypto/rand"
-import "math/big"
-import "math/rand"
-import "encoding/base64"
-import "sync"
-import "runtime"
-import "6.5840/raft"
-import "fmt"
-import "time"
-import "sync/atomic"
+	"6.5840/labrpc"
+
+	// import "log"
+	crand "crypto/rand"
+	"encoding/base64"
+	"fmt"
+	"math/big"
+	"math/rand"
+	"runtime"
+	"sync"
+	"sync/atomic"
+	"time"
+
+	"6.5840/raft"
+)
 
 func randstring(n int) string {
 	b := make([]byte, 2*n)
@@ -105,7 +110,7 @@ func (cfg *config) SnapshotSize() int {
 // attach server i to servers listed in to
 // caller must hold cfg.mu
 func (cfg *config) connectUnlocked(i int, to []int) {
-	// log.Printf("connect peer %d to %v\n", i, to)
+	log.Printf("connect peer %d to %v\n", i, to)
 
 	// outgoing socket files
 	for j := 0; j < len(to); j++ {
@@ -129,7 +134,7 @@ func (cfg *config) connect(i int, to []int) {
 // detach server i from the servers listed in from
 // caller must hold cfg.mu
 func (cfg *config) disconnectUnlocked(i int, from []int) {
-	// log.Printf("disconnect peer %d from %v\n", i, from)
+	log.Printf("disconnect peer %d from %v\n", i, from)
 
 	// outgoing socket files
 	for j := 0; j < len(from); j++ {
@@ -174,7 +179,7 @@ func (cfg *config) ConnectAll() {
 func (cfg *config) partition(p1 []int, p2 []int) {
 	cfg.mu.Lock()
 	defer cfg.mu.Unlock()
-	// log.Printf("partition servers into: %v %v\n", p1, p2)
+	log.Printf("partition servers into: %v %v\n", p1, p2)
 	for i := 0; i < len(p1); i++ {
 		cfg.disconnectUnlocked(p1[i], p2)
 		cfg.connectUnlocked(p1[i], p1)

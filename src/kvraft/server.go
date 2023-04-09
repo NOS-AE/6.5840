@@ -1,6 +1,7 @@
 package kvraft
 
 import (
+	"bytes"
 	"fmt"
 	"log"
 	"sync"
@@ -12,11 +13,18 @@ import (
 	"6.5840/raft"
 )
 
-const Debug = false
+const Debug = true
 
 func (kv *KVServer) DPrintf(format string, a ...interface{}) (n int, err error) {
 	if Debug {
 		kvlog.Printf("\033[1;44m[KVServer%d]\033[0m: %s", kv.me, fmt.Sprintf(format, a...))
+	}
+	return
+}
+
+func (kv *KVServer) DPrintf2(format string, a ...interface{}) (n int, err error) {
+	if Debug {
+		log.Printf("\033[1;44m[KVServer%d]\033[0m: %s", kv.me, fmt.Sprintf(format, a...))
 	}
 	return
 }
@@ -33,13 +41,18 @@ type Op struct {
 // key-value state machine
 type KVSM interface {
 	Get(key string) (string, Err)
+
+	// if value is empty, convert to delete.
+	// WARNING: the side effect of ErrNoKey
+	// bring to the Get on a previously existed key.
 	Put(key string, value string) Err
 	Append(key string, value string) Err
-}
 
-type PendingOp struct {
-	op      Op
-	replyCh chan PendingReply
+	// get entire underlying data
+	GetData() map[string]string
+
+	// replace underlying data with data
+	SetData(data map[string]string)
 }
 
 type PendingReply struct {
@@ -57,10 +70,11 @@ type KVServer struct {
 	maxraftstate int // snapshot if log grows this big
 
 	// Your definitions here.
-	sm             KVSM
-	lastSeq        map[int64]int64
-	pendingReplies map[int]PendingOp
-	lastApplied    int // for debug
+	sm           KVSM
+	lastSeq      map[int64]int64
+	pendingReply map[int]chan PendingReply
+	pendingOp    map[int]Op
+	persister    *raft.Persister
 }
 
 const applyTimeout = 150 * time.Millisecond
@@ -81,26 +95,29 @@ func (kv *KVServer) Do(args *DoArgs, reply *DoReply) {
 		kv.mu.Unlock()
 		return
 	}
-	pendingOp := PendingOp{
-		op:      op,
-		replyCh: make(chan PendingReply),
-	}
-	kv.pendingReplies[index] = pendingOp
+	pendingReply := make(chan PendingReply)
+	kv.pendingOp[index] = op
+	kv.pendingReply[index] = pendingReply
 	kv.mu.Unlock()
 
 	select {
 	case <-time.After(applyTimeout):
 		reply.Err = ErrTimeout
-	case r := <-pendingOp.replyCh:
+	case r := <-pendingReply:
 		reply.Err = r.err
 		reply.Value = r.value
 	}
 
-	kv.DPrintf("got reply: %+v", reply)
+	kv.DPrintf("got reply at %d: %+v, op=%+v", index, reply, op)
 
 	kv.mu.Lock()
-	delete(kv.pendingReplies, index)
+	delete(kv.pendingOp, index)
+	delete(kv.pendingReply, index)
 	kv.mu.Unlock()
+	select {
+	case <-pendingReply:
+	default:
+	}
 }
 
 // the tester calls Kill() when a KVServer instance won't
@@ -125,60 +142,92 @@ func (kv *KVServer) killed() bool {
 func (kv *KVServer) applier() {
 	for !kv.killed() {
 		m := <-kv.applyCh
-		// early catch of error in raft, this error may not appear if raft work correctly
-		if kv.lastApplied >= m.CommandIndex {
-			log.Fatalf("lastApplied=%d > nextIndex=%d", kv.lastApplied, m.CommandIndex)
-		} else {
-			kv.lastApplied = m.CommandIndex
-		}
+		if m.CommandValid {
+			kv.DPrintf2("got commit: %+v", m)
 
-		op := m.Command.(Op)
-		kv.mu.Lock()
-		pendingOp, pending := kv.pendingReplies[m.CommandIndex]
-		kv.mu.Unlock()
+			op := m.Command.(Op)
+			kv.mu.Lock()
+			pendingOp, pending := kv.pendingOp[m.CommandIndex]
+			kv.mu.Unlock()
 
-		dup := false
-		if op.Name != "Get" { // remove update duplicate
-			if kv.lastSeq[op.ClientId] >= op.Seq {
-				dup = true
-			} else {
-				kv.lastSeq[op.ClientId] = op.Seq
-			}
-		}
-
-		if dup { // duplicate update
+			isConflict := false
+			// original command is replaced by new leader's new command
+			// so apply the new command and report error
+			// to RPC to retry the original command
 			if pending {
-				pendingOp.replyCh <- PendingReply{err: OK}
+				kv.DPrintf2("check op equal at %d: %+v, %+v", m.CommandIndex, pendingOp, op)
+				_, isLeader := kv.rf.GetState()
+				if pendingOp.ClientId != op.ClientId || pendingOp.Seq != op.Seq || !isLeader {
+					isConflict = true
+				}
 			}
-			continue
-		}
-		reply := PendingReply{}
-		if !dup {
-			switch op.Name {
-			case "Get":
-				reply.value, reply.err = kv.sm.Get(op.Key)
-				kv.DPrintf("Get(%s)=%s", op.Key, reply.value)
-			case "Put":
-				reply.err = kv.sm.Put(op.Key, op.Value)
-				kv.DPrintf("Put(%s, %s)", op.Key, op.Value)
-			case "Append":
-				reply.err = kv.sm.Append(op.Key, op.Value)
-				kv.DPrintf("Append(%s, %s)", op.Key, op.Value)
-			default:
-				reply.err = ErrInvalidOp
-				kv.DPrintf("Invalid Op: %s", op.Name)
+
+			isDup := false
+			if op.Name != "Get" { // remove update duplicate
+				if kv.lastSeq[op.ClientId] >= op.Seq {
+					isDup = true
+				} else {
+					kv.lastSeq[op.ClientId] = op.Seq
+				}
 			}
-		}
-		// original command is replaced by new leader's new command
-		// so apply the new command (has apply above) and report error
-		// to RPC to retry the original command
-		if pendingOp.op != op {
-			reply.err = ErrWrongLeader
-		}
-		if pending {
-			pendingOp.replyCh <- reply
+			if isDup {
+				kv.DPrintf2("dup: %+v", m)
+			}
+
+			reply := PendingReply{err: OK}
+			if !isDup {
+				switch op.Name {
+				case "Get":
+					reply.value, reply.err = kv.sm.Get(op.Key)
+				case "Put":
+					reply.err = kv.sm.Put(op.Key, op.Value)
+				case "Append":
+					reply.err = kv.sm.Append(op.Key, op.Value)
+				default:
+					reply.err = ErrInvalidOp
+				}
+				if op.Name != "Get" {
+					kv.DPrintf2("after %+v: %+v", m, kv.sm.GetData())
+				}
+			}
+
+			if isConflict {
+				reply.err = ErrWrongLeader
+			}
+
+			// snapshot after apply and reply
+			if kv.maxraftstate > 0 && kv.persister.RaftStateSize() >= kv.maxraftstate {
+				w := new(bytes.Buffer)
+				e := labgob.NewEncoder(w)
+				e.Encode(kv.lastSeq)
+				e.Encode(kv.sm.GetData())
+				kv.DPrintf2("snapshot at %d", m.CommandIndex)
+				kv.rf.Snapshot(m.CommandIndex, w.Bytes())
+			}
+
+			kv.mu.Lock()
+			pendingReply := kv.pendingReply[m.CommandIndex]
+			if pendingReply != nil {
+				pendingReply <- reply
+			}
+			kv.mu.Unlock()
+		} else if m.SnapshotValid {
+			kv.installSnapshot(m.Snapshot)
+		} else {
+			// ignore other type of message
 		}
 	}
+}
+
+func (kv *KVServer) installSnapshot(snapshot []byte) {
+	r := bytes.NewBuffer(snapshot)
+	dec := labgob.NewDecoder(r)
+	var lastSeq map[int64]int64
+	var data map[string]string
+	dec.Decode(&lastSeq)
+	dec.Decode(&data)
+	kv.lastSeq = lastSeq
+	kv.sm.SetData(data)
 }
 
 // servers[] contains the ports of the set of
@@ -209,8 +258,13 @@ func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persiste
 
 	// You may need initialization code here.
 	kv.sm = newMemKV()
-	kv.pendingReplies = make(map[int]PendingOp)
+	kv.pendingOp = make(map[int]Op)
+	kv.pendingReply = make(map[int]chan PendingReply)
 	kv.lastSeq = make(map[int64]int64)
+	kv.persister = persister
+	if kv.maxraftstate > 0 && kv.persister.SnapshotSize() > 0 {
+		kv.installSnapshot(persister.ReadSnapshot())
+	}
 	go kv.applier()
 
 	return kv
@@ -235,11 +289,31 @@ func (sm *memKV) Get(key string) (string, Err) {
 }
 
 func (sm *memKV) Put(key string, value string) Err {
-	sm.data[key] = value
+	if value == "" {
+		delete(sm.data, key)
+	} else {
+		sm.data[key] = value
+	}
 	return OK
 }
 
 func (sm *memKV) Append(key string, value string) Err {
 	sm.data[key] += value
 	return OK
+}
+
+func (sm *memKV) GetData() map[string]string {
+	return clone(sm.data)
+}
+
+func (sm *memKV) SetData(data map[string]string) {
+	sm.data = clone(data)
+}
+
+func clone(data map[string]string) map[string]string {
+	ret := make(map[string]string)
+	for k, v := range data {
+		ret[k] = v
+	}
+	return ret
 }

@@ -6,12 +6,12 @@ import (
 )
 
 const (
-	OK             = "OK"
-	ErrNoKey       = "ErrNoKey"
-	ErrWrongLeader = "ErrWrongLeader"
-	ErrTimeout     = "ErrTimeout"
-	ErrInvalidOp   = "ErrInvalidOp"
-	ErrStaleOp     = "ErrStaleOp"
+	OK             Err = "OK"
+	ErrNoKey           = "ErrNoKey"
+	ErrWrongLeader     = "ErrWrongLeader"
+	ErrTimeout         = "ErrTimeout"
+	ErrInvalidOp       = "ErrInvalidOp"
+	ErrStaleOp         = "ErrStaleOp"
 )
 
 type Err string

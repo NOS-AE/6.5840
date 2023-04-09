@@ -106,4 +106,19 @@ if [[ "${params[*]}" =~ "3A" ]]; then
   test "3A Test" 10 "${lab3a_tests[@]}"
 fi
 
+declare -a lab3b_tests=(
+  TestSnapshotRPC3B
+  TestSnapshotSize3B
+  TestSpeed3B
+  TestSnapshotRecover3B
+  TestSnapshotRecoverManyClients3B
+  TestSnapshotUnreliable3B
+  TestSnapshotUnreliableRecover3B
+  TestSnapshotUnreliableRecoverConcurrentPartition3B
+  TestSnapshotUnreliableRecoverConcurrentPartitionLinearizable3B
+)
+if [[ "${params[*]}" =~ "3B" ]]; then
+  test "3B Test" 100 "${lab3b_tests[@]}"
+fi
+
 printf "\nALL PASS!"
